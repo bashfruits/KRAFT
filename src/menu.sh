@@ -1,5 +1,3 @@
-## SCRIPT FOUND BY BERRYY!! PLEASE DO NOT USE THIS ON A DEVICE YOU DO NOT OWN, OR YOU MAY FACE CONSEQUENCES WE'RE NOT LIABLE FOR!!!
-## I'll be leaving comments for people who don't understand bash.
 #!/bin/bash
 set -e
 BANNER=/etc/issue
