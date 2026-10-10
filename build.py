@@ -1037,32 +1037,11 @@ def build(board_in: str, local_zip: Optional[str] = None, allow_fallback: bool =
         roota_size  = (root_end2 - root_start2) * 512
 
         # shrink ROOT-A in-place before extracting it
-        roota_tmp = os.path.join(temp_dir, f"roota_{board}.bin")
-        with open(shim_bin, "rb") as f:
-            f.seek(roota_start)
-            with open(roota_tmp, "wb") as dst:
-                remaining = roota_size
-                while remaining:
-                    chunk = f.read(min(16 * 1024 * 1024, remaining))
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-                    remaining -= len(chunk)
-
-        try:
-            shrunk_sectors = _filesystem_min_size(roota_tmp, board)
-            shrunk_size = shrunk_sectors * 512
-            with open(roota_tmp, "rb+") as f:
-                f.truncate(shrunk_size)
-            print(f"[build:{board}] ROOT-A shrunk: {roota_size//1024//1024} MB -> {shrunk_size//1024//1024} MB")
-        except RuntimeError as exc:
-            print(f"[build:{board}] WARNING: could not shrink ROOT-A ({exc}), zipping full partition")
-
-        # create the zip atomically — just ROOT-A, not the full disk image
+        # zip the full patched disk image so CRU can flash it correctly
         inner_name = f"chromeos_kraft_{board}.bin"
         tmp_out = out_zip + f".tmp{os.getpid()}"
         with zipfile.ZipFile(tmp_out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as zf:
-            zf.write(roota_tmp, inner_name)
+            zf.write(shim_bin, inner_name)
         # verify zipped content
         verify_zip_contains_expected(tmp_out, inner_name, board)
         # atomic rename
