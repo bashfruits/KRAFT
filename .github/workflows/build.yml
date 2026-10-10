@@ -33,7 +33,6 @@ jobs:
 
           board = os.environ["BOARD"]
 
-          # aliases defined in build.py — keep in sync if build.py changes
           BOARD_ALIASES = {
               "craasneto": "nissa",
               "craask":    "nissa",
@@ -58,6 +57,19 @@ jobs:
           print("Board validated:", resolved)
           PY
 
+      - name: Resolve board name
+        id: resolve
+        env:
+          BOARD: ${{ github.event.inputs.board }}
+        run: |
+          RESOLVED=$(python3 -c "
+          import sys
+          ALIASES = {'craasneto': 'nissa', 'craask': 'nissa'}
+          b = sys.argv[1].strip().lower()
+          print(ALIASES.get(b, b))
+          " "$BOARD")
+          echo "board=$RESOLVED" >> $GITHUB_OUTPUT
+
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -77,60 +89,61 @@ jobs:
         uses: actions/cache@v4
         with:
           path: shim_cache
-          key: shim-${{ github.event.inputs.board }}-v1
+          key: shim-${{ steps.resolve.outputs.board }}-v1
 
-      - name: Restore cached shim
-        if: steps.cache-shim.outputs.cache-hit == 'true'
+      - name: Download shim (cache miss)
+        if: steps.cache-shim.outputs.cache-hit != 'true'
+        env:
+          RESOLVED: ${{ steps.resolve.outputs.board }}
         run: |
-          BOARD="${{ github.event.inputs.board }}"
-          RESOLVED=$(python3 -c "
-          import sys
-          ALIASES = {'craasneto': 'nissa', 'craask': 'nissa'}
-          b = sys.argv[1].strip().lower()
-          print(ALIASES.get(b, b))
-          " "$BOARD")
-          mkdir -p /tmp/kraft-shim
-          cp shim_cache/${RESOLVED}.bin /tmp/kraft-shim/${RESOLVED}.bin
-          echo "KRAFT_LOCAL_SHIM=/tmp/kraft-shim/${RESOLVED}.bin" >> $GITHUB_ENV
+          set -e
+          mkdir -p shim_cache
+          URL="https://dl.cros.download/files/${RESOLVED}/${RESOLVED}.zip"
+          echo "Downloading shim from $URL"
+          curl -fL --retry 3 --retry-delay 5 -o shim_cache/${RESOLVED}.zip "$URL"
+          # extract the .bin from the zip
+          python3 - <<PY
+          import os, zipfile, shutil
+
+          board = os.environ["RESOLVED"]
+          src   = f"shim_cache/{board}.zip"
+          dest  = f"shim_cache/{board}.bin"
+
+          if not zipfile.is_zipfile(src):
+              # already a raw bin
+              os.rename(src, dest)
+          else:
+              with zipfile.ZipFile(src, "r") as zf:
+                  bins = [n for n in zf.namelist() if n.lower().endswith(".bin")]
+                  if not bins:
+                      raise RuntimeError("No .bin in shim zip")
+                  # prefer exact board name match
+                  match = next((n for n in bins if os.path.basename(n).lower() == f"{board}.bin"), bins[0])
+                  with zf.open(match) as src_f, open(dest, "wb") as dst_f:
+                      shutil.copyfileobj(src_f, dst_f)
+              os.remove(src)
+
+          size = os.path.getsize(dest)
+          print(f"Shim saved: {dest} ({size // 1024 // 1024} MB)")
+          PY
 
       - name: Run build
         env:
           GITHUB_ACTIONS: "true"
+          RESOLVED: ${{ steps.resolve.outputs.board }}
+          BOARD: ${{ github.event.inputs.board }}
         run: |
-          BOARD="${{ github.event.inputs.board }}"
-          RESOLVED=$(python3 -c "
-          import sys
-          ALIASES = {'craasneto': 'nissa', 'craask': 'nissa'}
-          b = sys.argv[1].strip().lower()
-          print(ALIASES.get(b, b))
-          " "$BOARD")
-          if [ -n "$KRAFT_LOCAL_SHIM" ] && [ -f "$KRAFT_LOCAL_SHIM" ]; then
-            echo "Using cached shim: $KRAFT_LOCAL_SHIM"
-            python3 build.py "$BOARD" "$KRAFT_LOCAL_SHIM"
-          else
-            python3 build.py "$BOARD"
-            # save shim to cache for next run
-            mkdir -p shim_cache
-            SHIM=$(find /tmp -name "${RESOLVED}.bin" -size +100M 2>/dev/null | head -1)
-            if [ -n "$SHIM" ]; then
-              cp "$SHIM" shim_cache/${RESOLVED}.bin
-            fi
-          fi
+          set -e
+          SHIM="shim_cache/${RESOLVED}.bin"
+          echo "Using shim: $SHIM ($(du -h "$SHIM" | cut -f1))"
+          python3 build.py "$BOARD" "$SHIM"
 
       - name: Validate output
         env:
           BOARD: ${{ github.event.inputs.board }}
+          RESOLVED: ${{ steps.resolve.outputs.board }}
         run: |
           set -e
-
-          # resolve alias so we look for the right zip name (e.g. craasneto -> nissa)
-          RESOLVED=$(python3 -c "
-          import sys
-          ALIASES = {'craasneto': 'nissa', 'craask': 'nissa'}
-          b = sys.argv[1].strip().lower()
-          print(ALIASES.get(b, b))
-          " "$BOARD")
-
           ZIP="dist/kraft_${RESOLVED}.zip"
 
           if [ ! -s "$ZIP" ]; then
@@ -161,21 +174,9 @@ jobs:
           echo "ZIP size: $(du -h "$ZIP" | cut -f1)"
           sha256sum "$ZIP"
 
-      - name: Upload artifact
-        env:
-          BOARD: ${{ github.event.inputs.board }}
-        run: |
-          RESOLVED=$(python3 -c "
-          import sys
-          ALIASES = {'craasneto': 'nissa', 'craask': 'nissa'}
-          b = sys.argv[1].strip().lower()
-          print(ALIASES.get(b, b))
-          " "$BOARD")
-          echo "RESOLVED_BOARD=$RESOLVED" >> $GITHUB_ENV
-
       - name: Upload artifact (upload)
         uses: actions/upload-artifact@v4
         with:
           name: kraft-${{ github.event.inputs.board }}
-          path: dist/kraft_${{ env.RESOLVED_BOARD }}.zip
+          path: dist/kraft_${{ steps.resolve.outputs.board }}.zip
           retention-days: 14
