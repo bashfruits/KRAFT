@@ -1037,14 +1037,25 @@ def build(board_in: str, local_zip: Optional[str] = None, allow_fallback: bool =
         roota_size  = (root_end2 - root_start2) * 512
 
         # shrink ROOT-A in-place before extracting it
-        # zip the full patched disk image so CRU can flash it correctly
+        # Truncate the disk image to just past the last partition so CRU
+        # gets a valid image without the empty trailing space (shims are
+        # pre-allocated to ~8 GB but only use the first ~600 MB).
+        header2, entries2, _, _ = _read_gpt(shim_bin)
+        last_lba = max(e["end"] for e in entries2)
+        # keep 2048 sectors of padding after last partition + secondary GPT (33 sectors)
+        trunc_lba = last_lba + 2048 + 33
+        trunc_bytes = trunc_lba * 512
+        actual_size = os.path.getsize(shim_bin)
+        if trunc_bytes < actual_size:
+            with open(shim_bin, "r+b") as f:
+                f.truncate(trunc_bytes)
+            print(f"[build:{board}] disk truncated: {actual_size//1024//1024} MB -> {trunc_bytes//1024//1024} MB")
+
         inner_name = f"chromeos_kraft_{board}.bin"
         tmp_out = out_zip + f".tmp{os.getpid()}"
         with zipfile.ZipFile(tmp_out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as zf:
             zf.write(shim_bin, inner_name)
-        # verify zipped content
         verify_zip_contains_expected(tmp_out, inner_name, board)
-        # atomic rename
         os.replace(tmp_out, out_zip)
 
         print(f"[build:{board}] done: {out_zip} ({os.path.getsize(out_zip)//1024//1024} MB)")
