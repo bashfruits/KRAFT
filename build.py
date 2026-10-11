@@ -679,12 +679,16 @@ def patch_kernel_version(path: str, board: str) -> None:
     VBOOT2_MAGIC = b"VBKP"
 
     if head[:8] == VBOOT1_MAGIC:
-        # vboot1 layout: keyblock (magic at 0, size at 8) then preamble
-        keyblock_size = struct.unpack_from("<Q", head, 8)[0]
+        # vboot1 VbKeyBlockHeader layout:
+        #   offset 0:  uint8[8]  magic ("CHROMEOS")
+        #   offset 8:  uint8[32] magic_padding
+        #   offset 40: uint64    keyblock_size  ← correct offset
+        keyblock_size = struct.unpack_from("<Q", head, 40)[0]
         if keyblock_size < 64 or keyblock_size > 1024 * 1024:
             print(f"[build:{board}] WARNING: vboot1 keyblock_size {keyblock_size} out of range, skipping kernel version patch")
             return
-        # kernel_version is at preamble offset 0x20 (vboot1 VbKernelPreambleHeader)
+        # VbKernelPreambleHeader: preamble starts after keyblock
+        # kernel_version is at preamble offset 0x20
         preamble_off = keyblock_size
         kernel_version_off = preamble_off + 0x20
         print(f"[build:{board}] vboot1 keyblock detected, keyblock_size={keyblock_size}")
