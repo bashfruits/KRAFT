@@ -664,30 +664,25 @@ def patch_kernel_version(path: str, board: str) -> None:
     kern_start = kern_entry["start"] * sector
     kern_size  = (kern_entry["end"] - kern_entry["start"] + 1) * sector
 
+    # Read just the first 16 bytes to get keyblock_size, then read enough to cover it
     with open(path, "rb") as f:
         f.seek(kern_start)
-        kern_blob = bytearray(f.read(min(kern_size, 4096)))  # preamble is in first few KB
+        head = f.read(16)
+        if len(head) < 16:
+            print(f"[build:{board}] WARNING: KERN-A too small to parse, skipping kernel version patch")
+            return
+        keyblock_size = struct.unpack_from("<Q", head, 8)[0]
+        # keyblock_size must be sane — vboot keyblocks are typically 4–64 KB
+        if keyblock_size < 64 or keyblock_size > 1024 * 1024:
+            print(f"[build:{board}] WARNING: keyblock_size {keyblock_size} out of range, skipping kernel version patch")
+            return
+        # read keyblock + enough of preamble to reach kernel_version at preamble+0x20
+        read_size = min(keyblock_size + 0x30, kern_size)
+        f.seek(kern_start)
+        kern_blob = bytearray(f.read(read_size))
 
-    # vboot kernel blob layout:
-    #   0x00: keyblock (variable size, keyblock_size at offset 0x08)
-    #   keyblock_size: kernel preamble begins here
-    #
-    # kernel preamble layout (VbKernelPreambleHeader):
-    #   0x00  uint64  preamble_size
-    #   0x08  VbSignature preamble_signature (16 bytes)
-    #   0x18  uint32  header_version_major
-    #   0x1c  uint32  header_version_minor
-    #   0x20  uint64  kernel_version    <-- this is what we patch
-    #   ...
-
-    if len(kern_blob) < 16:
-        print(f"[build:{board}] WARNING: KERN-A too small to parse, skipping kernel version patch")
-        return
-
-    # keyblock size is at offset 8 as a uint64
-    keyblock_size = struct.unpack_from("<Q", kern_blob, 8)[0]
-    if keyblock_size < 64 or keyblock_size + 0x28 > len(kern_blob):
-        print(f"[build:{board}] WARNING: keyblock_size {keyblock_size} out of range, skipping kernel version patch")
+    if keyblock_size + 0x28 > len(kern_blob):
+        print(f"[build:{board}] WARNING: could not read full preamble, skipping kernel version patch")
         return
 
     preamble_off = keyblock_size
