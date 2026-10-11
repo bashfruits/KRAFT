@@ -664,29 +664,52 @@ def patch_kernel_version(path: str, board: str) -> None:
     kern_start = kern_entry["start"] * sector
     kern_size  = (kern_entry["end"] - kern_entry["start"] + 1) * sector
 
-    # Read just the first 16 bytes to get keyblock_size, then read enough to cover it
+    # Read the first 4096 bytes to detect vboot format and find keyblock_size
     with open(path, "rb") as f:
         f.seek(kern_start)
-        head = f.read(16)
-        if len(head) < 16:
-            print(f"[build:{board}] WARNING: KERN-A too small to parse, skipping kernel version patch")
-            return
+        head = f.read(4096)
+
+    if len(head) < 32:
+        print(f"[build:{board}] WARNING: KERN-A too small to parse, skipping kernel version patch")
+        return
+
+    # vboot1: keyblock starts with 8-byte magic "CHROMEOS"
+    # vboot2: preamble starts with 4-byte magic "VBKP" at offset 0
+    VBOOT1_MAGIC = b"CHROMEOS"
+    VBOOT2_MAGIC = b"VBKP"
+
+    if head[:8] == VBOOT1_MAGIC:
+        # vboot1 layout: keyblock (magic at 0, size at 8) then preamble
         keyblock_size = struct.unpack_from("<Q", head, 8)[0]
-        # keyblock_size must be sane — vboot keyblocks are typically 4–64 KB
         if keyblock_size < 64 or keyblock_size > 1024 * 1024:
-            print(f"[build:{board}] WARNING: keyblock_size {keyblock_size} out of range, skipping kernel version patch")
+            print(f"[build:{board}] WARNING: vboot1 keyblock_size {keyblock_size} out of range, skipping kernel version patch")
             return
-        # read keyblock + enough of preamble to reach kernel_version at preamble+0x20
-        read_size = min(keyblock_size + 0x30, kern_size)
+        # kernel_version is at preamble offset 0x20 (vboot1 VbKernelPreambleHeader)
+        preamble_off = keyblock_size
+        kernel_version_off = preamble_off + 0x20
+        print(f"[build:{board}] vboot1 keyblock detected, keyblock_size={keyblock_size}")
+    elif head[:4] == VBOOT2_MAGIC:
+        # vboot2 layout: preamble starts directly at offset 0
+        # VbKernelPreamble2: magic(4) + version(4) + flags(4) + ... kernel_version at offset 0x10
+        kernel_version_off = 0x10
+        keyblock_size = 0  # not applicable
+        preamble_off = 0
+        print(f"[build:{board}] vboot2 preamble detected (VBKP)")
+    else:
+        # Unknown format — dump first 16 bytes for diagnosis and skip
+        hex_head = head[:16].hex()
+        print(f"[build:{board}] WARNING: KERN-A has unknown vboot magic ({hex_head}), skipping kernel version patch")
+        return
+
+    # Read enough data to cover the preamble
+    read_size = min(max(kernel_version_off + 8, 4096), kern_size)
+    with open(path, "rb") as f:
         f.seek(kern_start)
         kern_blob = bytearray(f.read(read_size))
 
-    if keyblock_size + 0x28 > len(kern_blob):
+    if kernel_version_off + 8 > len(kern_blob):
         print(f"[build:{board}] WARNING: could not read full preamble, skipping kernel version patch")
         return
-
-    preamble_off = keyblock_size
-    kernel_version_off = preamble_off + 0x20
 
     current_version = struct.unpack_from("<Q", kern_blob, kernel_version_off)[0]
     if current_version == 1:
